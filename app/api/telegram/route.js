@@ -140,14 +140,17 @@ export async function POST(req) {
     }
 
     // ---- анкета пройдена
-    await supabase.from('leads').insert({
-      chat_id: chatId,
-      username: (msg.from && msg.from.username) || null,
+    // Имена колонок — как в существующей таблице leads:
+    // telegram_chat_id обязателен, остальные необязательны.
+    const lead = await supabase.from('leads').insert({
+      telegram_chat_id: chatId,
+      telegram_username: (msg.from && msg.from.username) || null,
       sphere: answers.sphere || null,
       task: answers.task || null,
       name: answers.name || null,
       contact: answers.contact || null,
     });
+    if (lead.error) console.error('leads insert failed', lead.error);
 
     await send(chatId, FINISH);
 
