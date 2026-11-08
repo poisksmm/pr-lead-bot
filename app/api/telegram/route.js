@@ -2,8 +2,7 @@
 //
 // Состояние анкеты хранится в Supabase, а не в памяти процесса: на Vercel
 // функция перезапускается на каждом сообщении, и память между вызовами
-// не сохраняется. Именно из-за этого прошлая версия зацикливалась на
-// «Чтобы начать, отправьте команду /start».
+// не сохраняется.
 
 import { createClient } from '@supabase/supabase-js';
 
@@ -11,6 +10,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+const CALENDLY = 'https://calendly.com/dianawwin/30min';
 
 function db() {
   return createClient(
@@ -24,17 +24,29 @@ function db() {
 
 const QUESTION = {
   sphere: 'В какой сфере у вас бизнес или стартап?',
-  task: 'Какая задача сейчас стоит перед вами?',
-  name: 'Как вас зовут?',
-  contact: 'Оставьте контакт для связи — телефон или @username.',
+  budget: 'Готовы ли вы вкладывать в продвижение от 500 000 ₸ в месяц?',
+  source: 'Откуда вы узнали о Диане?',
+  social: 'Пришлите ссылку на ваши соцсети или сайт.',
+  whatsapp: 'Оставьте номер WhatsApp для связи.',
 };
 
 const NEXT = {
-  sphere: 'task',
-  task: 'name',
-  name: 'contact',
-  contact: 'done',
+  sphere: 'budget',
+  budget: 'source',
+  source: 'social',
+  social: 'whatsapp',
+  whatsapp: 'done',
 };
+
+// Кнопки «Да/Нет» только на вопросе про бюджет.
+function keyboardFor(step) {
+  if (step !== 'budget') return { remove_keyboard: true };
+  return {
+    keyboard: [[{ text: 'Да' }, { text: 'Нет' }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
 
 const GREETING =
   'Здравствуйте! 👋 Я помогу быстро понять, чем может быть полезна ' +
@@ -49,24 +61,29 @@ const IDLE = 'Чтобы начать, отправьте команду /start'
 
 // ---------------------------------------------------------------- Telegram
 
-async function send(chatId, text) {
+async function send(chatId, text, markup) {
+  const body = {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  };
+  if (markup) body.reply_markup = markup;
   await fetch(`${API}/sendMessage`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+    body: JSON.stringify(body),
   });
 }
 
 // ---------------------------------------------------------------- вебхук
 
 export async function GET() {
-  // Чтобы можно было глазами проверить, что маршрут жив.
   return Response.json({ ok: true, service: 'pr-lead-bot' });
 }
 
 export async function POST(req) {
   try {
-    // Запросы принимаются только от Telegram: секрет приходит в заголовке.
     const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
     if (
       secret &&
@@ -86,7 +103,6 @@ export async function POST(req) {
 
     // Защита от повторной обработки: Telegram переотправляет апдейт,
     // если вебхук ответил не 200 или ответил слишком медленно.
-    // Из-за этого приветствие приходило дважды подряд.
     const dupe = await supabase
       .from('bot_updates')
       .insert({ update_id: update.update_id });
@@ -101,7 +117,7 @@ export async function POST(req) {
         updated_at: new Date().toISOString(),
       });
       await send(chatId, GREETING);
-      await send(chatId, QUESTION.sphere);
+      await send(chatId, QUESTION.sphere, keyboardFor('sphere'));
       return Response.json({ ok: true });
     }
 
@@ -115,7 +131,6 @@ export async function POST(req) {
     const step = session ? session.step : 'done';
 
     // Подсказка про /start срабатывает ТОЛЬКО когда активной анкеты нет.
-    // В прошлой версии эта ветка перехватывала нормальные ответы — отсюда петля.
     if (!session || step === 'done' || !QUESTION[step]) {
       await send(chatId, IDLE);
       return Response.json({ ok: true });
@@ -135,36 +150,40 @@ export async function POST(req) {
       .eq('chat_id', chatId);
 
     if (nextStep !== 'done') {
-      await send(chatId, QUESTION[nextStep]);
+      await send(chatId, QUESTION[nextStep], keyboardFor(nextStep));
       return Response.json({ ok: true });
     }
 
     // ---- анкета пройдена
-    // Имена колонок — как в существующей таблице leads:
-    // telegram_chat_id обязателен, остальные необязательны.
+    const budgetYes = /^\s*да/i.test(answers.budget || '');
+    const username = (msg.from && msg.from.username) || null;
+
     const lead = await supabase.from('leads').insert({
       telegram_chat_id: chatId,
-      telegram_username: (msg.from && msg.from.username) || null,
+      telegram_username: username,
       sphere: answers.sphere || null,
-      task: answers.task || null,
-      name: answers.name || null,
-      contact: answers.contact || null,
+      budget_yes: budgetYes,
+      source: answers.source || null,
+      social_links: answers.social || null,
+      whatsapp_number: answers.whatsapp || null,
+      qualified: budgetYes,
     });
     if (lead.error) console.error('leads insert failed', lead.error);
 
-    await send(chatId, FINISH);
+    await send(chatId, FINISH, { remove_keyboard: true });
 
     if (process.env.ADMIN_CHAT_ID) {
       await send(
         Number(process.env.ADMIN_CHAT_ID),
-        '<b>Новая заявка</b>\n\n' +
-          `Имя: ${answers.name}\n` +
-          `Сфера: ${answers.sphere}\n` +
-          `Задача: ${answers.task}\n` +
-          `Контакт: ${answers.contact}\n` +
-          `Telegram: ${
-            msg.from && msg.from.username ? '@' + msg.from.username : '—'
-          }`
+        '🔔 <b>Новая заявка в боте</b>\n\n' +
+          `Сфера: ${answers.sphere || '—'}\n` +
+          `Бюджет от 500 000 ₸: ${budgetYes ? 'Да' : 'Нет'}\n` +
+          `Откуда узнали: ${answers.source || '—'}\n` +
+          `Соцсети/сайт: ${answers.social || '—'}\n` +
+          `WhatsApp: ${answers.whatsapp || '—'}\n` +
+          `Telegram: ${username ? '@' + username : '—'}\n` +
+          `Статус: ${budgetYes ? '✅ квалифицирован' : '⚪️ не квалифицирован'}\n` +
+          `Calendly для отправки в WhatsApp: ${CALENDLY}`
       );
     }
 
